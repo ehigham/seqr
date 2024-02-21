@@ -838,7 +838,7 @@ class BaseHailTableQuery(object):
 
         def key(v):
             ks = [v[k] for k in self.KEY_FIELD]
-            return ks[0] if len(self.KEY_FIELD) == 0 else hl.tuple(ks)
+            return ks[0] if len(self.KEY_FIELD) == 1 else hl.tuple(ks)
 
         ch_ht = ch_ht.group_by('gene_ids').aggregate(
             vs=primary_variants.flatmap(lambda v1:
