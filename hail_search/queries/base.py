@@ -808,8 +808,8 @@ class BaseHailTableQuery(object):
             secondary_filters = self._get_annotation_filters(ch_ht, is_secondary=True) if self._has_secondary_annotations else []
 
             ch_ht = ch_ht.annotate(
-                is_primary=hl.any(primary_filters),
-                is_secondary=hl.any(secondary_filters)
+                is_primary=hl.coalesce(hl.any(primary_filters), False),
+                is_secondary=hl.coalesce(hl.any(secondary_filters), False)
             )
 
             self.unfiltered_comp_het_ht = ch_ht.filter(ch_ht.is_primary | ch_ht.is_secondary)
