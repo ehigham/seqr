@@ -792,7 +792,11 @@ class BaseHailTableQuery(object):
         ch_ht = self._comp_het_ht
 
         # # Get possible pairs of variants within the same gene
-        ch_ht = ch_ht.annotate(gene_ids=self._gene_ids_expr(ch_ht))
+        def key(v):
+            ks = [v[k] for k in self.KEY_FIELD]
+            return ks[0] if len(self.KEY_FIELD) == 1 else hl.tuple(ks)
+
+        ch_ht = ch_ht.annotate(key_=key(ch_ht.row), gene_ids=self._gene_ids_expr(ch_ht))
         ch_ht = ch_ht.explode(ch_ht.gene_ids)
 
         # Filter allowed transcripts to the grouped gene
@@ -821,51 +825,35 @@ class BaseHailTableQuery(object):
             # In cases where comp het pairs must have different data types, there are no single data type results
             return None
 
-        if self._has_secondary_annotations:
-
-            primary_variants = hl.agg.filter(ch_ht.is_primary, hl.agg.collect(ch_ht.row))
-            row_agg = ch_ht.row
-            if ALLOWED_TRANSCRIPTS in row_agg and ALLOWED_SECONDARY_TRANSCRIPTS in row_agg:
-                # Ensure main transcripts are properly selected for primary/secondary annotations in variant pairs
-                row_agg = row_agg.annotate(**{ALLOWED_TRANSCRIPTS: row_agg[ALLOWED_SECONDARY_TRANSCRIPTS]})
-            secondary_variants = hl.agg.filter(ch_ht.is_secondary, hl.agg.collect(row_agg))
-        else:
+        if not self._has_secondary_annotations:
             if transcript_annotations:
                 ch_ht = ch_ht.filter(hl.any(self._get_annotation_filters(ch_ht)))
 
-            primary_variants = hl.agg.collect(ch_ht.row)
-            secondary_variants = primary_variants
-
-        def key(v):
-            ks = [v[k] for k in self.KEY_FIELD]
-            return ks[0] if len(self.KEY_FIELD) == 1 else hl.tuple(ks)
-
-        vs = primary_variants.flatmap(lambda v1:
-            hl.rbind(key(v1), lambda kv1:
-                secondary_variants.filter(lambda v2:
-                    ~v2.is_primary | ~v1.is_secondary | (kv1 < key(v2))
+        variants = ch_ht.filter(ch_ht.is_primary | ch_ht.is_secondary).collect(_localize=False)
+        variants = variants.group_by(lambda v: v.gene_ids)
+        variants = variants.items().flatmap(lambda gvs:
+            hl.rbind(gvs[0], gvs[1], lambda gene_id, variants:
+                hl.rbind(
+                    variants.filter(lambda v: v.is_primary),
+                    variants.filter(lambda v: v.is_secondary),
+                    lambda v1s, v2s:
+                        v1s.flatmap(lambda v1:
+                            v2s \
+                            .filter(lambda v2: ~v2.is_primary | ~v1.is_secondary | (v1.key_ < v2.key_)) \
+                            .map(lambda v2: hl.tuple([gene_id, v1, v2]))
+                        )
                 )
-            ).map(lambda v2: hl.tuple([v1, v2]))
+            )
         )
 
-        genes_and_variants = ch_ht.aggregate(
-            hl.agg.group_by(ch_ht.gene_ids, vs).items(),
-            _localize=False
-        )
+        variants = variants.group_by(lambda v: hl.tuple([v[1].key_, v[2].key_]))
 
         ch_ht = hl.Table.parallelize(
-            genes_and_variants.aggregate(lambda gvs:
-                hl.agg.explode(
-                    lambda v:
-                        hl.agg.group_by(
-                            hl.tuple([key(v[i]) for i in [0, 1]]),
-                            hl.struct(
-                                v1=hl.agg.take(v[0], 1)[0],
-                                v2=hl.agg.take(v[1], 1)[0],
-                                comp_het_gene_ids=hl.agg.collect_as_set(gvs[0]),
-                            )
-                        ).values(),
-                    gvs[1]
+            variants.values().map(lambda v:
+                hl.struct(
+                    comp_het_gene_ids=hl.set(v.map(lambda v: v[0])),
+                    v1=v[0][1],
+                    v2=v[0][2],
                 )
             )
         )
