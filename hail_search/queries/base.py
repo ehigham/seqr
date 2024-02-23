@@ -791,7 +791,7 @@ class BaseHailTableQuery(object):
         # pylint: disable=pointless-string-statement
         ch_ht = self._comp_het_ht
 
-        # Get possible pairs of variants within the same gene
+        # # Get possible pairs of variants within the same gene
         ch_ht = ch_ht.annotate(gene_ids=self._gene_ids_expr(ch_ht))
         ch_ht = ch_ht.explode(ch_ht.gene_ids)
 
@@ -800,8 +800,8 @@ class BaseHailTableQuery(object):
             k: ch_ht[k].filter(lambda t: t.gene_id == ch_ht.gene_ids)
             for k in [ALLOWED_TRANSCRIPTS, ALLOWED_SECONDARY_TRANSCRIPTS] if k in ch_ht.row
         }
-        if transcript_annotations:
-            ch_ht = ch_ht.annotate(**transcript_annotations)
+
+        ch_ht = ch_ht.annotate(**transcript_annotations)
 
         if transcript_annotations or self._has_secondary_annotations:
             primary_filters = self._get_annotation_filters(ch_ht)
@@ -840,18 +840,21 @@ class BaseHailTableQuery(object):
             ks = [v[k] for k in self.KEY_FIELD]
             return ks[0] if len(self.KEY_FIELD) == 1 else hl.tuple(ks)
 
-        ch_ht = ch_ht.group_by('gene_ids').aggregate(
-            vs=primary_variants.flatmap(lambda v1:
-                hl.rbind(key(v1), lambda kv1:
-                    secondary_variants.filter(lambda v2:
-                        ~v2.is_primary | ~v1.is_secondary | (kv1 < key(v2))
-                    )
-                ).map(lambda v2: hl.tuple([v1, v2]))
-            )
+        vs = primary_variants.flatmap(lambda v1:
+            hl.rbind(key(v1), lambda kv1:
+                secondary_variants.filter(lambda v2:
+                    ~v2.is_primary | ~v1.is_secondary | (kv1 < key(v2))
+                )
+            ).map(lambda v2: hl.tuple([v1, v2]))
+        )
+
+        genes_and_variants = ch_ht.aggregate(
+            hl.agg.group_by(ch_ht.gene_ids, vs).items(),
+            _localize=False
         )
 
         ch_ht = hl.Table.parallelize(
-            ch_ht.aggregate(
+            genes_and_variants.aggregate(lambda gvs:
                 hl.agg.explode(
                     lambda v:
                         hl.agg.group_by(
@@ -859,12 +862,11 @@ class BaseHailTableQuery(object):
                             hl.struct(
                                 v1=hl.agg.take(v[0], 1)[0],
                                 v2=hl.agg.take(v[1], 1)[0],
-                                comp_het_gene_ids=hl.agg.collect_as_set(ch_ht.gene_ids),
+                                comp_het_gene_ids=hl.agg.collect_as_set(gvs[0]),
                             )
-                        ),
-                    ch_ht.vs
-                ).values(),
-                _localize=False
+                        ).values(),
+                    gvs[1]
+                )
             )
         )
 
